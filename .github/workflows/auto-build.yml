@@ -1,0 +1,145 @@
+name: Auto Build on Upstream Release
+
+# 上游 15dd/hikari_novel_flutter 发布新 Release 时自动同步并构建 APK
+on:
+  schedule:
+    - cron: '23 */6 * * *' # 每 6 小时检查一次上游
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '忽略已有产物,强制重新构建'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: auto-build
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: 15dd/hikari_novel_flutter
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get latest upstream release
+        id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$UPSTREAM_REPO/releases?per_page=1" --jq '.[0].tag_name' > "$RUNNER_TEMP/tag.txt"
+          gh api "repos/$UPSTREAM_REPO/releases?per_page=1" --jq '.[0].name' > "$RUNNER_TEMP/release_name.txt"
+          gh api "repos/$UPSTREAM_REPO/releases?per_page=1" --jq '.[0].body' > "$RUNNER_TEMP/release_notes.md"
+          TAG=$(cat "$RUNNER_TEMP/tag.txt")
+          if [ -z "$TAG" ]; then
+            echo "上游没有可用的 Release,退出"
+            exit 1
+          fi
+          echo "Upstream latest release: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Decide whether to build
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.upstream.outputs.tag }}
+          FORCE: ${{ inputs.force || 'false' }}
+        run: |
+          BUILD=true
+          if [ "$FORCE" != "true" ] && gh release view "$TAG" >/dev/null 2>&1; then
+            ASSETS=$(gh release view "$TAG" --json assets --jq '.assets | length')
+            if [ "$ASSETS" -gt 0 ]; then
+              BUILD=false
+            fi
+          fi
+          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
+          echo "Build needed: $BUILD"
+
+      - name: Sync main and release tag from upstream
+        env:
+          TAG: ${{ steps.upstream.outputs.tag }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream "https://github.com/$UPSTREAM_REPO.git"
+          git fetch upstream main --tags
+          git checkout main
+          # 上游没有 .github 目录,合并不会冲突;保留本仓库的 workflow 文件
+          git merge upstream/main -m "Sync upstream ${TAG}"
+          git push origin main
+          git push origin "refs/tags/$TAG"
+
+      - name: Set up JDK 17
+        if: steps.decide.outputs.build == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter
+        if: steps.decide.outputs.build == 'true'
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Restore signing keystore
+        if: steps.decide.outputs.build == 'true'
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > "$RUNNER_TEMP/hikari-novel-ci.jks"
+
+      - name: Build release APK
+        if: steps.decide.outputs.build == 'true'
+        env:
+          TAG: ${{ steps.upstream.outputs.tag }}
+          KEYSTORE_PATH: ${{ runner.temp }}/hikari-novel-ci.jks
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          # 严格按上游 tag 的源码构建,不包含本仓库任何改动
+          git checkout "$TAG"
+          flutter pub get
+          printf 'flutter.sdk=%s\n' "$FLUTTER_ROOT" >> android/local.properties
+          cd android
+          ./gradlew --no-daemon assembleRelease \
+            -Pandroid.injected.signing.store.file="$KEYSTORE_PATH" \
+            -Pandroid.injected.signing.store.password="$KEYSTORE_PASSWORD" \
+            -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
+            -Pandroid.injected.signing.key.password="$KEY_PASSWORD"
+          cd ..
+          cp build/app/outputs/flutter-apk/app-release.apk "hikari_novel_${TAG}.apk"
+
+      - name: Verify APK signature
+        if: steps.decide.outputs.build == 'true'
+        env:
+          TAG: ${{ steps.upstream.outputs.tag }}
+        run: |
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -1)
+          "$APKSIGNER" verify --print-certs "hikari_novel_${TAG}.apk" | head -5
+
+      - name: Create release with APK
+        if: steps.decide.outputs.build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.upstream.outputs.tag }}
+        run: |
+          NAME=$(cat "$RUNNER_TEMP/release_name.txt")
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "hikari_novel_${TAG}.apk" --clobber
+          else
+            gh release create "$TAG" "hikari_novel_${TAG}.apk" \
+              --title "$NAME" \
+              --notes-file "$RUNNER_TEMP/release_notes.md" \
+              --latest
+          fi
+          echo "Done: https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
