@@ -55,8 +55,8 @@ jobs:
           FORCE: ${{ inputs.force || 'false' }}
         run: |
           BUILD=true
-          if [ "$FORCE" != "true" ] && gh release view "$TAG" >/dev/null 2>&1; then
-            ASSETS=$(gh release view "$TAG" --json assets --jq '.assets | length')
+          if [ "$FORCE" != "true" ] && gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            ASSETS=$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets | length')
             if [ "$ASSETS" -gt 0 ]; then
               BUILD=false
             fi
@@ -144,10 +144,12 @@ jobs:
           TAG: ${{ steps.upstream.outputs.tag }}
         run: |
           NAME=$(cat "$RUNNER_TEMP/release_name.txt")
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "hikari_novel_${TAG}.apk" --clobber
+          # 多 remote 场景下 gh 会解析到上游仓库,必须显式指定本仓库
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "hikari_novel_${TAG}.apk" -R "$GITHUB_REPOSITORY" --clobber
           else
             gh release create "$TAG" "hikari_novel_${TAG}.apk" \
+              -R "$GITHUB_REPOSITORY" \
               --title "$NAME" \
               --notes-file "$RUNNER_TEMP/release_notes.md" \
               --latest
