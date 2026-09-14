@@ -115,7 +115,10 @@ jobs:
           # 严格按上游 tag 的源码构建,不包含本仓库任何改动
           git checkout "$TAG"
           flutter pub get
-          printf 'flutter.sdk=%s\n' "$FLUTTER_ROOT" >> android/local.properties
+          # flutter pub get 已写入 flutter.sdk;仅在缺失时补写,避免追加导致配置损坏
+          if ! grep -q '^flutter.sdk=' android/local.properties 2>/dev/null; then
+            printf 'flutter.sdk=%s\n' "$FLUTTER_ROOT" >> android/local.properties
+          fi
           cd android
           # 上游未提交 gradlew 包装器,直接使用 setup-gradle 安装的 gradle
           gradle --no-daemon assembleRelease \
