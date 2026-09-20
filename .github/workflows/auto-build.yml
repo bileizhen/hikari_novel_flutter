@@ -78,12 +78,29 @@ jobs:
           git push origin main
           git push origin "refs/tags/$TAG"
 
-      - name: Set up JDK 17
+      - name: Detect Gradle version from release tag
+        if: steps.decide.outputs.build == 'true'
+        id: gradlever
+        env:
+          TAG: ${{ steps.upstream.outputs.tag }}
+        run: |
+          git checkout "$TAG"
+          # 上游每次发版可能调整 Gradle 版本,按 tag 内声明安装,避免硬编码失效
+          VERSION=$(sed -n 's/.*gradle-\([0-9][0-9.]*\)-\(bin\|all\)\.zip/\1/p' \
+            android/gradle/wrapper/gradle-wrapper.properties | tail -1)
+          if [ -z "$VERSION" ]; then
+            echo "无法从 wrapper 解析 Gradle 版本,回退 9.3.1"
+            VERSION="9.3.1"
+          fi
+          echo "Gradle required by $TAG: $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Set up JDK 21
         if: steps.decide.outputs.build == 'true'
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
       - name: Set up Flutter
         if: steps.decide.outputs.build == 'true'
@@ -96,7 +113,7 @@ jobs:
         if: steps.decide.outputs.build == 'true'
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.14' # 与上游 android/gradle/wrapper/gradle-wrapper.properties 一致
+          gradle-version: ${{ steps.gradlever.outputs.version }}
 
       - name: Restore signing keystore
         if: steps.decide.outputs.build == 'true'
